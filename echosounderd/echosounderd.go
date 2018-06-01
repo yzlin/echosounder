@@ -3,6 +3,7 @@ package echosounderd
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -25,6 +27,8 @@ type EchoSounderd struct {
 	statServer         *http.Server
 	statServerListener net.Listener
 	waitGroup          util.WaitGroupWrapper
+	stat               stat
+	dummyRateLimit     <-chan time.Time
 }
 
 // New initializes an EchoSounderd object with corresponding options.
@@ -32,6 +36,8 @@ func New(opts *Options) *EchoSounderd {
 	e := &EchoSounderd{
 		opts: opts,
 	}
+
+	e.dummyRateLimit = time.Tick(time.Second / 30) // 30 req/s
 
 	log.SetOutput(os.Stdout)
 
@@ -92,6 +98,26 @@ func (e *EchoSounderd) Main() {
 
 	// run stat server
 	if e.statServer != nil {
+		http.HandleFunc("/stat", func(w http.ResponseWriter, r *http.Request) {
+			totalReq := atomic.LoadInt64(&e.stat.totalRequest)
+			processedReq := atomic.LoadInt64(&e.stat.processedRequest)
+
+			resp, _ := json.Marshal(&struct {
+				CurrentConnection int64 `json:"current_connection"`
+				TotalRequest      int64 `json:"total_request"`
+				ProcessedRequest  int64 `json:"processed_request"`
+				WaitingRequest    int64 `json:"waiting_request"`
+			}{
+				CurrentConnection: atomic.LoadInt64(&e.stat.currentConnection),
+				TotalRequest:      totalReq,
+				ProcessedRequest:  processedReq,
+				WaitingRequest:    totalReq - processedReq,
+			})
+
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Write(resp)
+			w.Write([]byte("\n"))
+		})
 		e.waitGroup.Wrap(func() {
 			if err := e.statServer.Serve(e.statServerListener); err != nil {
 				log.Fatal(err)
@@ -100,6 +126,7 @@ func (e *EchoSounderd) Main() {
 	}
 }
 
+// Exit shuts the service down
 func (e *EchoSounderd) Exit() {
 	if e.statServer != nil {
 		// Shutdown gracefully, but wait no longer than 10 seconds
@@ -117,18 +144,24 @@ func (e *EchoSounderd) Exit() {
 }
 
 func (e *EchoSounderd) handleTCPRequest(conn net.Conn) {
+	atomic.AddInt64(&e.stat.currentConnection, 1)
+	log.Printf("[%s] connected", conn.RemoteAddr())
 	defer func() {
+		atomic.AddInt64(&e.stat.currentConnection, -1)
 		log.Printf("[%s] disconnected", conn.RemoteAddr())
 		conn.Close()
 	}()
-
-	// TODO: configurable read deadline
-	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 
 	reader := bufio.NewReader(conn)
 
 cmdLoop:
 	for {
+		// TODO: configurable read deadline
+		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+
+		// Prompt
+		conn.Write([]byte(">>> "))
+
 		resp := ""
 
 		bytes, _, err := reader.ReadLine()
@@ -142,7 +175,34 @@ cmdLoop:
 		cmd = strings.TrimSpace(cmd)
 		switch cmd {
 		case "quit":
+			conn.Write([]byte("bye~\n"))
 			break cmdLoop
+
+		case "stat":
+			totalReq := atomic.LoadInt64(&e.stat.totalRequest)
+			processedReq := atomic.LoadInt64(&e.stat.processedRequest)
+			resp = fmt.Sprintf(`
+	Current connection: %d
+	Total request: %d
+	Processed request: %d
+	Waiting request: %d`,
+				atomic.LoadInt64(&e.stat.currentConnection),
+				totalReq,
+				processedReq,
+				totalReq-processedReq,
+			)
+
+		case "dummy":
+			atomic.AddInt64(&e.stat.totalRequest, 1)
+			<-e.dummyRateLimit
+			p, err := requestDummyAPI()
+			if err != nil {
+				log.Printf("[%s] Failed to request dummy API: %s", conn.RemoteAddr(), err)
+				resp = fmt.Sprintf("Failed to request dummy API: %s", err)
+			} else {
+				resp = fmt.Sprintf("\tTitle: %s\n\tBody: %s", p.Title, p.Body)
+			}
+			atomic.AddInt64(&e.stat.processedRequest, 1)
 
 		default:
 			resp = fmt.Sprintf("Unknown command: %s", cmd)
