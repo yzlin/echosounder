@@ -1,0 +1,10 @@
+---
+version: '3'
+
+services:
+  app:
+    build: .
+    ports:
+      - '23:10023'
+      - '80:10080'
+    command: echosounderd
