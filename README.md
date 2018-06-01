@@ -52,7 +52,7 @@ Connection closed by foreign host.
 - `stat` shows current statistics just like what you request from HTTP statistics server (but in different format).
 - `quit` exits REPL and closes the connection.
 
-### REPL HTTP service
+### Statistics HTTP service
 
 ```sh
 $ curl http://localhost/stat
