@@ -46,7 +46,7 @@ func New(opts *Options) *EchoSounderd {
 	return e
 }
 
-// Main is the orion service's main function.
+// Main is the echosounder service's main function.
 func (e *EchoSounderd) Main() {
 	tcpListener, err := net.Listen("tcp", e.opts.ListenAddress)
 	if err != nil {
